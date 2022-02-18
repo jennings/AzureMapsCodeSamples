@@ -1,19 +1,28 @@
 ﻿import * as atlas from "azure-maps-control";
 import * as atlasRest from "azure-maps-rest";
+import {
+  fetchStoreData,
+  getStoresWithinDistance,
+  initializeQuery,
+  searchFeatureByFuzzyQuery,
+  Store,
+} from "./query";
+import type { Pipeline } from "azure-maps-rest";
+import { GeoJsonGeometryTypes } from "geojson";
 
 //The maximum zoom level to cluster data point data on the map.
 var maxClusterZoomLevel = 11;
 
-//The URL to the store location data.
-var storeLocationDataUrl = "data/ContosoCoffee.txt";
-
 //The URL to the icon image.
 var iconImageUrl = "images/CoffeeIcon.png";
 
-//An array of country region ISO2 values to limit searches to.
-var countrySet = ["US", "CA", "GB", "FR", "DE", "IT", "ES", "NL", "DK"];
+var map: atlas.Map,
+  popup,
+  datasource,
+  iconLayer,
+  centerMarker,
+  searchURL: atlasRest.SearchURL;
 
-var map, popup, datasource, iconLayer, centerMarker, searchURL;
 var listItemTemplate =
   '<div class="listItem" onclick="itemSelected(\'{id}\')"><div class="listItem-title">{title}</div>{city}<br />Open until {closes}<br />{distance} miles away</div>';
 
@@ -31,35 +40,15 @@ function initialize() {
       //authType: "subscriptionKey",
       authType: atlas.AuthenticationType.subscriptionKey,
       subscriptionKey: "3fFAQe0HqVuSKQI1-G9lDU2_lbFeqZqrCDvKjVyt5A0",
-
-      //Use Azure Active Directory authentication.
-      // authType: 'anonymous',
-      // getToken: function (resolve, reject, map) {
-      //   //URL to your authentication service that retrieves an Azure Active Directory Token.
-      //   var tokenServiceUrl =
-      //     "https://azuremapscodesamples.azurewebsites.net/Common/TokenService.ashx";
-
-      //   fetch(tokenServiceUrl)
-      //     .then(function (response) {
-      //       return response.text();
-      //     })
-      //     .then(function (token) {
-      //       resolve(token);
-      //     });
-      // },
     },
   });
 
   //Create a popup but leave it closed so we can update it and display it later.
   popup = new atlas.Popup();
 
-  //Use MapControlCredential to share authentication between a map control and the service module.
-  var pipeline = atlasRest.MapsURL.newPipeline(
-    new atlasRest.MapControlCredential(map)
-  );
-
-  //Create an instance of the SearchURL client.
-  searchURL = new atlasRest.SearchURL(pipeline);
+  const credential = new atlasRest.MapControlCredential(map);
+  const queryData = initializeQuery(credential);
+  searchURL = queryData.searchURL;
 
   //If the user presses the search button, geocode the value they passed in.
   document.getElementById("searchBtn")!.onclick = performSearch;
@@ -78,7 +67,7 @@ function initialize() {
   map.events.add("ready", function () {
     //Add the zoom control to the map.
     map.controls.add(new atlas.control.ZoomControl(), {
-      position: "top-right",
+      position: atlas.ControlPosition.TopRight,
     });
 
     //Add an HTML marker to the map to indicate the center used for searching.
@@ -165,13 +154,13 @@ function initialize() {
       map.events.add("click", clusterBubbleLayer, function (e) {
         map.setCamera({
           center: e.position,
-          zoom: map.getCamera().zoom + 2,
+          zoom: map.getCamera().zoom! + 2,
         });
       });
 
       //Add a click event to the icon layer and show the shape that was clicked.
-      map.events.add("click", iconLayer, function (e) {
-        showPopup(e.shapes[0]);
+      map.events.add("click", iconLayer, function (e: atlas.MapMouseEvent) {
+        showPopup(e.shapes![0]);
       });
 
       //Add an event to monitor when the map has finished moving.
@@ -183,99 +172,55 @@ function initialize() {
   });
 }
 
+let loadedStores: Store[];
+
 function loadStoreData() {
   //Download the store location data.
-  fetch(storeLocationDataUrl)
-    .then((response) => response.text())
-    .then(function (text) {
-      //Parse the Tab delimited file data into GeoJSON features.
-      var features: any[] = [];
+  fetchStoreData().then(function (stores) {
+    loadedStores = stores;
 
-      //Split the lines of the file.
-      var lines = text.split("\n");
+    //Parse the Tab delimited file data into GeoJSON features.
+    const features: atlas.data.Feature<atlas.data.Point, Store>[] = [];
 
-      //Grab the header row.
-      var row = lines[0].split("\t");
+    for (const store of stores) {
+      features.push(
+        new atlas.data.Feature(
+          new atlas.data.Point([store.Longitude, store.Latitude]),
+          store
+        )
+      );
+    }
 
-      //Parse the header row and index each column, so that when our code for parsing each row is easier to follow.
-      var header = {};
-      var numColumns = row.length;
-      var i;
+    //Add the features to the data source.
+    datasource.add(features);
 
-      for (i = 0; i < row.length; i++) {
-        header[row[i]] = i;
-      }
-
-      //Skip the header row and then parse each row into a GeoJSON feature.
-      for (i = 1; i < lines.length; i++) {
-        row = lines[i].split("\t");
-
-        //Ensure that the row has the right number of columns.
-        if (row.length >= numColumns) {
-          features.push(
-            new atlas.data.Feature(
-              new atlas.data.Point([
-                parseFloat(row[header["Longitude"]]),
-                parseFloat(row[header["Latitude"]]),
-              ]),
-              {
-                AddressLine: row[header["AddressLine"]],
-                City: row[header["City"]],
-                Municipality: row[header["Municipality"]],
-                AdminDivision: row[header["AdminDivision"]],
-                Country: row[header["Country"]],
-                PostCode: row[header["PostCode"]],
-                Phone: row[header["Phone"]],
-                StoreType: row[header["StoreType"]],
-                IsWiFiHotSpot:
-                  row[header["IsWiFiHotSpot"]].toLowerCase() === "true"
-                    ? true
-                    : false,
-                IsWheelchairAccessible:
-                  row[header["IsWheelchairAccessible"]].toLowerCase() === "true"
-                    ? true
-                    : false,
-                Opens: parseInt(row[header["Opens"]]),
-                Closes: parseInt(row[header["Closes"]]),
-              }
-            )
-          );
-        }
-      }
-
-      //Add the features to the data source.
-      datasource.add(features);
-
-      //Initially update the list items.
-      updateListItems();
-    });
+    //Initially update the list items.
+    updateListItems();
+  });
 }
 
 function performSearch() {
   var query = (document.getElementById("searchTbx") as HTMLInputElement).value;
+  searchFeatureByFuzzyQuery(searchURL, query).then((feature) => {
+    if (feature != null) {
+      // Calculating nearby stores without the map
+      const storesWithin25Units = getStoresWithinDistance(
+        25,
+        feature.geometry.coordinates,
+        loadedStores
+      );
+      console.log("Nearby stores:", storesWithin25Units);
 
-  //Perform a fuzzy search on the users query.
-  searchURL
-    .searchFuzzy(atlasRest.Aborter.timeout(3000), query, {
-      //Pass in the array of country ISO2 for which we want to limit the search to.
-      countrySet: countrySet,
-      view: "Auto",
-    })
-    .then((results) => {
-      //Parse the response into GeoJSON so that the map can understand.
-      var data = results.geojson.getFeatures();
-
-      if (data.features.length > 0) {
-        //Set the camera to the bounds of the results.
-        map.setCamera({
-          bounds: data.features[0].bbox,
-          padding: 40,
-        });
-      } else {
-        document.getElementById("listPanel")!.innerHTML =
-          '<div class="statusMessage">Unable to find the location you searched for.</div>';
-      }
-    });
+      //Set the camera to the bounds of the results.
+      map.setCamera({
+        bounds: feature.bbox,
+        padding: 40,
+      });
+    } else {
+      document.getElementById("listPanel")!.innerHTML =
+        '<div class="statusMessage">Unable to find the location you searched for.</div>';
+    }
+  });
 }
 
 function setMapToUserLocation() {
@@ -321,7 +266,7 @@ function updateListItems() {
   var listPanel = document.getElementById("listPanel")!;
 
   //Check to see if the user is zoomed out a lot. If they are, tell them to zoom in closer, perform a search or press the My Location button.
-  if (camera.zoom < maxClusterZoomLevel) {
+  if (camera.zoom! < maxClusterZoomLevel) {
     //Close the popup as clusters may be displayed on the map.
     popup.close();
 
@@ -335,8 +280,7 @@ function updateListItems() {
     });
 
     //List the ten closest locations in the side panel.
-    var html: any[] = [],
-      properties;
+    var html: string[] = [];
 
     /*
             Generating HTML for each item that looks like this:
@@ -350,9 +294,9 @@ function updateListItems() {
          */
 
     //Get all the shapes that have been rendered in the bubble layer.
-    var data = map.layers.getRenderedShapes(map.getCamera().bounds, [
-      iconLayer,
-    ]);
+    var data = map.layers
+      .getRenderedShapes(map.getCamera().bounds, [iconLayer])
+      .filter((x): x is atlas.Shape => x instanceof atlas.Shape);
 
     //Create an index of the distances of each shape.
     var distances = {};
@@ -363,7 +307,7 @@ function updateListItems() {
         distances[shape.getId()] =
           Math.round(
             atlas.math.getDistanceTo(
-              camera.center,
+              camera.center!,
               // @ts-expect-error
               shape.getCoordinates(),
               "miles"
@@ -378,11 +322,11 @@ function updateListItems() {
     });
 
     data.forEach(function (shape) {
-      properties = shape.getProperties();
+      const properties = shape.getProperties();
 
       html.push(
         '<div class="listItem" onclick="itemSelected(\'',
-        shape.getId(),
+        `${shape.getId()}`,
         '\')"><div class="listItem-title">',
         properties["AddressLine"],
         "</div>",
@@ -491,7 +435,7 @@ function showPopup(shape) {
   var distance =
     Math.round(
       atlas.math.getDistanceTo(
-        map.getCamera().center,
+        map.getCamera().center!,
         shape.getCoordinates(),
         "miles"
       ) * 100
